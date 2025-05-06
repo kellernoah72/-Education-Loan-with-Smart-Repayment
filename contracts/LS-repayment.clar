@@ -120,3 +120,62 @@
     (match (map-get? loans borrower)
         loan-data (ok (/ (* (get income loan-data) (var-get min-income-percentage)) u1000))
         ERR-NO-LOAN-EXISTS))
+
+
+(define-constant PAYMENT-PERIODS u12)
+
+(define-read-only (generate-payment-schedule (borrower principal))
+    (let (
+        (loan-data (unwrap! (map-get? loans borrower) ERR-NO-LOAN-EXISTS))
+        (min-payment (unwrap! (calculate-min-payment borrower) ERR-NO-LOAN-EXISTS))
+        (remaining (get remaining loan-data))
+    )
+    (ok {
+        monthly-payment: (/ remaining PAYMENT-PERIODS),
+        min-payment: min-payment,
+        total-remaining: remaining,
+        payment-periods: PAYMENT-PERIODS
+    })))
+
+
+(define-constant EARLY-REPAYMENT-BLOCKS u1000)
+(define-constant EARLY-REPAYMENT-DISCOUNT-PERCENT u5)
+
+(define-public (make-early-repayment)
+    (let (
+        (borrower tx-sender)
+        (loan-data (unwrap! (map-get? loans borrower) ERR-NO-LOAN-EXISTS))
+        (blocks-elapsed (- stacks-block-height (get start-block loan-data)))
+        (remaining (get remaining loan-data))
+    )
+        (asserts! (is-eq (get status loan-data) "active") ERR-LOAN-NOT-ACTIVE)
+        (asserts! (<= blocks-elapsed EARLY-REPAYMENT-BLOCKS) ERR-INVALID-AMOUNT)
+        
+        (let (
+            (discount (/ (* remaining EARLY-REPAYMENT-DISCOUNT-PERCENT) u100))
+            (final-payment (- remaining discount))
+        )
+            (try! (stx-transfer? final-payment borrower (var-get contract-owner)))
+            
+            (map-set loans borrower {
+                amount: (get amount loan-data),
+                remaining: u0,
+                income: (get income loan-data),
+                status: "completed",
+                start-block: (get start-block loan-data),
+                last-payment: stacks-block-height
+            })
+            
+            (match (map-get? borrower-stats borrower)
+                prev-stats (map-set borrower-stats borrower {
+                    total-borrowed: (get total-borrowed prev-stats),
+                    total-repaid: (+ final-payment (get total-repaid prev-stats)),
+                    loans-taken: (get loans-taken prev-stats)
+                })
+                (map-set borrower-stats borrower {
+                    total-borrowed: u0,
+                    total-repaid: final-payment,
+                    loans-taken: u0
+                })
+            )
+            (ok true))))
